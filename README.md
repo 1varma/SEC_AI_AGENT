@@ -28,7 +28,7 @@
 
 ## 1. Abstract
 
-This project presents an end-to-end financial intelligence platform that ingests, processes, and semantically indexes the complete corpus of SEC EDGAR 10-K and 10-Q filings for all S&P 500 constituents. The system constructs a vector database of over 1.9 million text chunks derived from 38,136 cleaned filing documents, enabling sub-second approximate nearest-neighbour retrieval across a multi-year, multi-company corpus. A multi-agent reasoning layer, powered by Anthropic Claude, synthesizes retrieved evidence with structured stock and macroeconomic data to answer complex financial research queries in natural language. The platform is designed as an open, extensible alternative to proprietary terminals such as Bloomberg and FactSet, with no per-seat licensing cost.
+This project presents an end-to-end financial intelligence platform that ingests, processes, and semantically indexes the complete corpus of SEC EDGAR 10-K (annual), 10-Q (quarterly), and 8-K (current reports) filings for all S&P 500 constituents. The system constructs a vector database of over 1.9 million text chunks derived from 38,136 cleaned filing documents, enabling sub-second approximate nearest-neighbour retrieval across a multi-year, multi-company corpus. A multi-agent reasoning layer, powered by Anthropic Claude, synthesizes retrieved evidence with structured stock and macroeconomic data to answer complex financial research queries in natural language. The platform is designed as an open, extensible alternative to proprietary terminals such as Bloomberg and FactSet, with no per-seat licensing cost.
 
 ---
 
@@ -82,41 +82,63 @@ Recent advances in dense retrieval and large language models enable a fundamenta
 
 ## 4. Data Pipeline
 
-The data pipeline is fully decoupled into independent, resumable stages. Each stage can be re-run independently without affecting upstream or downstream stages.
+The data pipeline is fully decoupled into independent, resumable stages. Each stage can be re-run independently without affecting upstream or downstream stages. Three SEC filing types are ingested — 10-K (annual), 10-Q (quarterly), and 8-K (current reports) — all through the same processing pipeline.
 
 ```
-SEC EDGAR
-    │
-    ▼
-downloader.ipynb ──────► S3: raw_html/ (38,183 HTML files)
-    │
-    ▼
-convert_to_md.py ──────► data/md_files/ (38,136 .md files)
-    │
-    ▼
-create_table.py ───────► PostgreSQL: filing_chunks schema
-    │
-    ▼
-chunk.py ──────────────► filing_chunks (text only, embedding = NULL)
-    │
-    ▼
-embed.py ───────────────► filing_chunks (embedding populated, IVFFlat index)
+                          SEC EDGAR
+                              │
+              ┌───────────────┼───────────────┐
+              ▼               ▼               ▼
+           10-K            10-Q            8-K
+        (Annual)        (Quarterly)   (Current Reports:
+                                       Earnings, M&A,
+                                    Leadership, Material
+                                          Events)
+              └───────────────┼───────────────┘
+                              ▼
+                     downloader.ipynb ──────► S3: raw_html/
+                              │
+                              ▼
+                     convert_to_md.py ──────► data/md_files/ (.md files)
+                              │
+                              ▼
+                     create_table.py ───────► PostgreSQL: filing_chunks schema
+                              │
+                              ▼
+                     chunk.py ──────────────► filing_chunks (text, embedding = NULL)
+                              │
+                              ▼
+                     embed.py ───────────────► filing_chunks (embeddings + IVFFlat index)
 ```
 
 ### 4.1 SEC Filing Acquisition
 
 **Script:** `downloader.ipynb`
 
-Downloads all 10-K (annual) and 10-Q (quarterly) filings for all S&P 500 constituents from SEC EDGAR via the `edgar` Python library.
+Downloads 10-K, 10-Q, and 8-K filings for all S&P 500 constituents from SEC EDGAR via the `edgar` Python library and stores them in AWS S3.
 
 | Parameter | Value |
 |---|---|
 | Target companies | S&P 500 (505 tickers) |
-| Filing types | 10-K, 10-Q |
+| Filing types | 10-K (annual), 10-Q (quarterly), 8-K (current reports) |
 | Rate limit | 10 requests/second (SEC mandated) |
 | Parallelism | 8 threads (ThreadPoolExecutor) |
 | Storage | AWS S3 (`raw_html/TICKER/TICKER_TYPE_DATE.html`) |
-| Result | 38,183 HTML files |
+| Current result | 38,183 HTML files (10-K + 10-Q) |
+
+**8-K Filing Coverage (Phase 2):**
+SEC Form 8-K is a current report filed within 4 business days of any material corporate event. For S&P 500 companies this includes:
+
+| Event Type | Examples |
+|---|---|
+| Earnings | Quarterly results, guidance updates |
+| Corporate actions | M&A announcements, divestitures, spin-offs |
+| Leadership | CEO/CFO changes, board appointments |
+| Legal & regulatory | Material litigation, SEC investigations, settlements |
+| Financial | Credit rating changes, debt issuances, covenant breaches |
+| Operational | Plant closures, product recalls, cybersecurity incidents |
+
+8-K filings are significantly more frequent than 10-K/10-Q — S&P 500 companies collectively file thousands per year — making them the highest-signal source for time-sensitive business intelligence. Adding 8-K support to `downloader.ipynb` requires a single change: `form=["10-K", "10-Q", "8-K"]`.
 
 **Key design decisions:**
 - Token-bucket `RateLimiter` class enforces the SEC's 10 req/sec limit across all threads simultaneously
@@ -292,7 +314,7 @@ Five domain-specialised agents, orchestrated by a routing agent (Claude):
 
 | Agent | Data Source | Capability |
 |---|---|---|
-| **SEC Research** | `filing_chunks` pgvector | Semantic search over 38k filings |
+| **SEC Research** | `filing_chunks` pgvector | Semantic search over 10-K, 10-Q, and 8-K filings |
 | **Market** | `stock_prices` | OHLCV, returns, volatility, drawdown |
 | **Fundamental** | `financials` | P/E, EV/EBITDA, revenue, margins, debt |
 | **News** | `news_chunks` pgvector | Recent news semantic search + sentiment |
@@ -411,17 +433,22 @@ for row in cur.fetchall():
 
 | Stage | Input | Output | Notes |
 |---|---|---|---|
-| Download | 505 companies | 38,183 HTML files | 8 threads, ~10 req/s |
-| Convert | 38,183 HTML files | 38,136 `.md` files | 16 CPU workers |
-| Chunk | 38,136 `.md` files | ~1.9M rows | 24 CPU workers, batched |
-| Embed | ~1.9M chunks | ~1.9M embeddings | GPU, 256/batch |
+| Download (10-K + 10-Q) | 505 companies | 38,183 HTML → S3 | 8 threads, ~10 req/s |
+| Download (8-K, planned) | 505 companies | ~50,000+ HTML → S3 | Same pipeline, `form=["8-K"]` |
+| Convert | HTML files | `.md` files | 16 CPU workers, resumable |
+| Chunk | `.md` files | rows (embedding = NULL) | 24 CPU workers, batched |
+| Embed | chunks | 384-dim embeddings | GPU, 256/batch, resumable |
 | Query | 1 natural language query | Top-k chunks | <10ms with IVFFlat |
 
-**Storage:**
+**Storage (current — 10-K + 10-Q only):**
 - Raw HTML (S3): ~180 GB
 - Markdown files: ~12 GB
 - PostgreSQL (text only): ~8 GB
 - PostgreSQL (+ embeddings): ~11 GB
+
+**Storage (projected — after 8-K added):**
+- 8-K filings are shorter than 10-K/10-Q but far more numerous
+- Estimated additional corpus: ~3–5 GB markdown, ~3 GB PostgreSQL with embeddings
 
 ---
 
@@ -435,9 +462,11 @@ for row in cur.fetchall():
 - [x] GPU embedding pipeline (fully resumable)
 
 ### Phase 2 — In Progress
-- [ ] S3 → local download script for 8k new files
-- [ ] Re-run convert/chunk/embed on new files
-- [ ] Complete documentation
+- [ ] Extend `downloader.ipynb` to fetch 8-K filings (`form=["10-K", "10-Q", "8-K"]`)
+- [ ] Run `convert_to_md.py` on 8-K HTML files (fully resumable — skips already-converted)
+- [ ] Run `chunk.py` in incremental mode (INSERT without TRUNCATE for new filings)
+- [ ] Run `embed.py` to embed new NULL rows (already resumable by design)
+- [ ] Complete and finalise all documentation
 
 ### Phase 3 — Stock & Fundamental Data
 - [ ] `stock_prices` table — daily OHLCV via yfinance
@@ -506,6 +535,7 @@ SEC_AI_AGENT/
 ├── create_table.py           # PostgreSQL schema creation
 ├── chunk.py                  # Parallel chunker + PostgreSQL inserter
 ├── embed.py                  # GPU embedder + IVFFlat index builder
+# [planned] downloader.ipynb extended for 8-K filings
 ├── CODE_EXPLANATION.md       # Detailed per-script technical documentation
 └── README.md                 # This file
 ```
