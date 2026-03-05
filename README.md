@@ -85,49 +85,52 @@ Recent advances in dense retrieval and large language models enable a fundamenta
 The data pipeline is fully decoupled into independent, resumable stages. Each stage can be re-run independently without affecting upstream or downstream stages. Three SEC filing types are ingested — 10-K (annual), 10-Q (quarterly), and 8-K (current reports) — all through the same processing pipeline.
 
 ```
-                          SEC EDGAR
-                              │
-              ┌───────────────┼───────────────┐
-              ▼               ▼               ▼
-           10-K            10-Q            8-K
-        (Annual)        (Quarterly)   (Current Reports:
-                                       Earnings, M&A,
-                                    Leadership, Material
-                                          Events)
-              └───────────────┼───────────────┘
-                              ▼
-                     downloader.ipynb ──────► S3: raw_html/
-                              │
-                              ▼
-                     convert_to_md.py ──────► data/md_files/ (.md files)
-                              │
-                              ▼
-                     create_table.py ───────► PostgreSQL: filing_chunks schema
-                              │
-                              ▼
-                     chunk.py ──────────────► filing_chunks (text, embedding = NULL)
-                              │
-                              ▼
-                     embed.py ───────────────► filing_chunks (embeddings + IVFFlat index)
+ SEC EDGAR (10-K + 10-Q)          AWS S3: raw_8k/               AWS S3: stocks/
+         │                        (8-K HTML filings)            (473 ticker CSVs)
+         ▼                                │                             │
+  downloader.ipynb                  download_8k.py               ingest_stocks.py
+  → S3: raw_html/                   → data/raw_html/             → stock_prices table
+         │                                │
+         └──────────────┬─────────────────┘
+                        ▼
+               convert_to_md.py ──────► data/md_files/
+               (FORCE_RERUN=False        (.md files)
+                skips existing)
+                        │
+                        ▼
+               create_table.py ───────► PostgreSQL: filing_chunks schema
+                        │
+                        ▼
+               chunk.py ──────────────► filing_chunks (text, embedding = NULL)
+               (INCREMENTAL=True         ON CONFLICT DO NOTHING for top-ups)
+                skips existing)
+                        │
+                        ▼
+               embed.py ───────────────► filing_chunks (embeddings + IVFFlat index)
+               (WHERE embedding           fully resumable)
+                IS NULL)
 ```
 
 ### 4.1 SEC Filing Acquisition
 
-**Script:** `downloader.ipynb`
+**Scripts:** `downloader.ipynb` (10-K + 10-Q from EDGAR) · `download_8k.py` (8-K from S3)
 
-Downloads 10-K, 10-Q, and 8-K filings for all S&P 500 constituents from SEC EDGAR via the `edgar` Python library and stores them in AWS S3.
+**10-K + 10-Q — `downloader.ipynb`**
 
 | Parameter | Value |
 |---|---|
 | Target companies | S&P 500 (505 tickers) |
-| Filing types | 10-K (annual), 10-Q (quarterly), 8-K (current reports) |
+| Filing types | 10-K (annual), 10-Q (quarterly) |
 | Rate limit | 10 requests/second (SEC mandated) |
 | Parallelism | 8 threads (ThreadPoolExecutor) |
 | Storage | AWS S3 (`raw_html/TICKER/TICKER_TYPE_DATE.html`) |
-| Current result | 38,183 HTML files (10-K + 10-Q) |
+| Result | 38,183 HTML files |
 
-**8-K Filing Coverage (Phase 2):**
-SEC Form 8-K is a current report filed within 4 business days of any material corporate event. For S&P 500 companies this includes:
+Key design: token-bucket `RateLimiter` enforces SEC's rate limit across all threads. S3 `head_object` existence check makes it fully idempotent.
+
+**8-K — `download_8k.py`**
+
+8-K is a current report filed within 4 business days of any material corporate event — the highest-signal source for time-sensitive intelligence.
 
 | Event Type | Examples |
 |---|---|
@@ -138,12 +141,15 @@ SEC Form 8-K is a current report filed within 4 business days of any material co
 | Financial | Credit rating changes, debt issuances, covenant breaches |
 | Operational | Plant closures, product recalls, cybersecurity incidents |
 
-8-K filings are significantly more frequent than 10-K/10-Q — S&P 500 companies collectively file thousands per year — making them the highest-signal source for time-sensitive business intelligence. Adding 8-K support to `downloader.ipynb` requires a single change: `form=["10-K", "10-Q", "8-K"]`.
-
-**Key design decisions:**
-- Token-bucket `RateLimiter` class enforces the SEC's 10 req/sec limit across all threads simultaneously
-- S3 existence check (`head_object`) before each download — fully idempotent, safe to re-run
-- Uses `ThreadPoolExecutor` (not multiprocessing) because the workload is I/O-bound
+| Parameter | Value |
+|---|---|
+| Source | `s3://sec-filings-raw-data-ashish-v1/raw_8k/` |
+| Total S3 objects | 170,531 |
+| Unique 8-K filings | ~56,800 |
+| File selection | `primary-document.html` → `.txt` → any `.html/.htm` per filing folder |
+| Output | `data/raw_html/TICKER/TICKER_8-K_ACCESSION.html` |
+| Parallelism | 16 threads (I/O bound) |
+| Resume | Skips files already on disk |
 
 ---
 
@@ -159,7 +165,14 @@ Converts raw SEC HTML filings to clean plain-text markdown, removing HTML struct
 | File size limit | 20 MB (larger files skipped as malformed) |
 | Min output length | 200 characters |
 | Batch size | 2,000 files per pool instance |
-| Result | 38,136 clean `.md` files |
+| Result | 38,136 clean `.md` files (10-K + 10-Q); 8-K files appended in Phase 2 |
+
+**`FORCE_RERUN` flag:**
+```python
+FORCE_RERUN = False  # skip already-converted files (set when adding 8-K on top of existing)
+FORCE_RERUN = True   # re-convert everything from scratch (default for first run)
+```
+When adding 8-K files to an existing corpus, set `FORCE_RERUN = False` — the script checks if a `.md` output already exists and is clean before skipping, so 38k already-converted files are untouched.
 
 **iXBRL stripping:**
 Modern SEC filings (2017+) embed XBRL taxonomy data in `<ix:header>` and `<ix:hidden>` blocks. These contain thousands of machine-readable dimension entries that produce unusable text when extracted naively. The stripper uses `str.find()` boundary detection rather than regex to avoid catastrophic backtracking on multi-megabyte files.
@@ -183,7 +196,7 @@ Identifies SEC standard section headers (`Item 1.`, `PART I`, `RISK FACTORS` etc
 CREATE TABLE filing_chunks (
     id           SERIAL PRIMARY KEY,
     ticker       VARCHAR(10)  NOT NULL,
-    filing_type  VARCHAR(10)  NOT NULL,      -- '10-K' or '10-Q'
+    filing_type  VARCHAR(10)  NOT NULL,      -- '10-K', '10-Q', or '8-K'
     filing_date  DATE,
     section      TEXT,                        -- e.g. 'Risk Factors'
     chunk_index  INTEGER,                     -- position within section
@@ -227,6 +240,13 @@ Documents are first split by markdown headers (`#`, `##`, `###`) into named sect
 **Why multiprocessing, not threads:**
 Chunking is CPU-bound (regex, string splitting, I/O). Python's GIL prevents true parallelism with threads for CPU-bound work. `multiprocessing.Pool` with `maxtasksperchild=20` provides true parallelism and bounds per-worker memory growth.
 
+**`INCREMENTAL` flag:**
+```python
+INCREMENTAL = False  # TRUNCATE table and rechunk everything (default, first run)
+INCREMENTAL = True   # skip files already in DB, append only new chunks (use for 8-K top-ups)
+```
+When `INCREMENTAL = True`, the script queries `SELECT DISTINCT source_file FROM filing_chunks` at startup and skips any file already present — existing 10-K/10-Q chunks are completely untouched.
+
 ---
 
 ### 4.5 Semantic Embedding
@@ -269,11 +289,16 @@ Built after all embeddings are populated. IVFFlat partitions the vector space in
 ```
 Database: sec_filings
 │
-└── filing_chunks
-    ├── ~1.9M rows
-    ├── vector(384) embeddings
-    ├── B-tree indexes: ticker, filing_type, filing_date
-    └── IVFFlat index: embedding (cosine)
+├── filing_chunks
+│   ├── ~1.9M rows (10-K + 10-Q); grows with 8-K ingestion
+│   ├── vector(384) embeddings
+│   ├── B-tree indexes: ticker, filing_type, filing_date
+│   └── IVFFlat index: embedding (cosine)
+│
+└── stock_prices
+    ├── ~5.2M rows (473 tickers, 1980–2026)
+    ├── OHLCV daily data
+    └── B-tree indexes: ticker, date, (ticker, date)
 ```
 
 **Similarity query:**
@@ -315,7 +340,7 @@ Five domain-specialised agents, orchestrated by a routing agent (Claude):
 | Agent | Data Source | Capability |
 |---|---|---|
 | **SEC Research** | `filing_chunks` pgvector | Semantic search over 10-K, 10-Q, and 8-K filings |
-| **Market** | `stock_prices` | OHLCV, returns, volatility, drawdown |
+| **Market** | `stock_prices` (473 tickers, 1980–2026) | OHLCV, returns, volatility, drawdown |
 | **Fundamental** | `financials` | P/E, EV/EBITDA, revenue, margins, debt |
 | **News** | `news_chunks` pgvector | Recent news semantic search + sentiment |
 | **Macro** | FRED API | Interest rates, CPI, GDP, yield curve |
@@ -381,23 +406,49 @@ export AWS_DEFAULT_REGION="us-east-1"
 
 ## 9. Usage
 
-### Run the full pipeline
+### Full pipeline — first run (10-K + 10-Q)
 
 ```bash
-# Step 1 — Download SEC filings to S3 (run once)
+# Step 1 — Download 10-K + 10-Q from SEC EDGAR → S3
 jupyter nbconvert --to notebook --execute notebooks/downloader.ipynb
 
-# Step 2 — Convert HTML → Markdown
+# Step 2 — Convert HTML → Markdown (FORCE_RERUN = True by default)
 python convert_to_md.py
 
-# Step 3 — Create database schema
+# Step 3 — Create filing_chunks schema
 python create_table.py
 
-# Step 4 — Chunk and insert text
+# Step 4 — Chunk and insert (INCREMENTAL = False by default)
 python chunk.py
 
-# Step 5 — Generate embeddings and build vector index
+# Step 5 — Embed and build IVFFlat index
 python embed.py
+```
+
+### Add 8-K filings (incremental top-up)
+
+```bash
+# Step 1 — Download 8-K HTML from S3 → data/raw_html/
+python download_8k.py
+
+# Step 2 — Convert only new 8-K files (set FORCE_RERUN = False first)
+python convert_to_md.py
+
+# Step 3 — Chunk only new files (set INCREMENTAL = True first)
+python chunk.py
+
+# Step 4 — Embed new NULL rows (no changes needed)
+python embed.py
+```
+
+### Ingest stock data
+
+```bash
+# Step 1 — Create stock_prices schema
+python create_stock_table.py
+
+# Step 2 — Download 473 ticker CSVs from S3 and insert
+python ingest_stocks.py
 ```
 
 ### Query the vector store directly
@@ -433,43 +484,44 @@ for row in cur.fetchall():
 
 | Stage | Input | Output | Notes |
 |---|---|---|---|
-| Download (10-K + 10-Q) | 505 companies | 38,183 HTML → S3 | 8 threads, ~10 req/s |
-| Download (8-K, planned) | 505 companies | ~50,000+ HTML → S3 | Same pipeline, `form=["8-K"]` |
-| Convert | HTML files | `.md` files | 16 CPU workers, resumable |
-| Chunk | `.md` files | rows (embedding = NULL) | 24 CPU workers, batched |
+| Download 10-K/10-Q | 505 companies | 38,183 HTML → S3 | 8 threads, ~10 req/s |
+| Download 8-K | S3 `raw_8k/` (170k objects) | ~56,800 HTML → local | 16 threads, resumable |
+| Stock ingest | S3 `stocks/` (473 CSVs) | ~5.2M rows → PostgreSQL | 8 threads, idempotent |
+| Convert | HTML files | `.md` files | 16 CPU workers, `FORCE_RERUN` flag |
+| Chunk | `.md` files | rows (embedding = NULL) | 24 CPU workers, `INCREMENTAL` flag |
 | Embed | chunks | 384-dim embeddings | GPU, 256/batch, resumable |
 | Query | 1 natural language query | Top-k chunks | <10ms with IVFFlat |
 
-**Storage (current — 10-K + 10-Q only):**
-- Raw HTML (S3): ~180 GB
-- Markdown files: ~12 GB
-- PostgreSQL (text only): ~8 GB
-- PostgreSQL (+ embeddings): ~11 GB
+**Storage (10-K + 10-Q corpus):**
+- Raw HTML (S3): ~180 GB · Markdown: ~12 GB · PostgreSQL + embeddings: ~11 GB
 
-**Storage (projected — after 8-K added):**
-- 8-K filings are shorter than 10-K/10-Q but far more numerous
-- Estimated additional corpus: ~3–5 GB markdown, ~3 GB PostgreSQL with embeddings
+**Storage (after 8-K added):**
+- Additional ~3–5 GB markdown · ~3 GB PostgreSQL with embeddings
+
+**Stock data:**
+- ~5.2M rows · 473 tickers · 1980–2026 · ~1.5 GB PostgreSQL
 
 ---
 
 ## 11. Roadmap
 
-### Phase 1 — Current (Complete)
-- [x] SEC EDGAR downloader (38k filings)
-- [x] HTML → Markdown converter with iXBRL stripping
-- [x] PostgreSQL schema with pgvector
-- [x] Section-aware chunking pipeline
-- [x] GPU embedding pipeline (fully resumable)
+### Phase 1 — Complete
+- [x] `downloader.ipynb` — SEC EDGAR → S3 (38,183 filings, 10-K + 10-Q)
+- [x] `convert_to_md.py` — HTML → Markdown with iXBRL stripping (`FORCE_RERUN` flag)
+- [x] `create_table.py` — PostgreSQL schema with pgvector
+- [x] `chunk.py` — section-aware chunking, flat memory, `INCREMENTAL` flag
+- [x] `embed.py` — GPU embedding pipeline, fully resumable
 
-### Phase 2 — In Progress
-- [ ] Extend `downloader.ipynb` to fetch 8-K filings (`form=["10-K", "10-Q", "8-K"]`)
-- [ ] Run `convert_to_md.py` on 8-K HTML files (fully resumable — skips already-converted)
-- [ ] Run `chunk.py` in incremental mode (INSERT without TRUNCATE for new filings)
-- [ ] Run `embed.py` to embed new NULL rows (already resumable by design)
-- [ ] Complete and finalise all documentation
+### Phase 2 — Scripts Ready, Pending Execution
+- [x] `download_8k.py` — downloads ~56,800 8-K filings from `s3://sec-filings-raw-data-ashish-v1/raw_8k/`
+- [ ] Run `convert_to_md.py` with `FORCE_RERUN = False` on 8-K files
+- [ ] Run `chunk.py` with `INCREMENTAL = True` on 8-K markdown
+- [ ] Run `embed.py` on new NULL rows
+- [x] Documentation complete
 
-### Phase 3 — Stock & Fundamental Data
-- [ ] `stock_prices` table — daily OHLCV via yfinance
+### Phase 3 — Scripts Ready, Pending Execution
+- [x] `create_stock_table.py` — `stock_prices` schema (OHLCV + indexes)
+- [x] `ingest_stocks.py` — 473 ticker CSVs from `s3://sec-filings-raw-data-ashish-v1/stocks/` → PostgreSQL (~5.2M rows, 1980–2026)
 - [ ] `financials` table — EPS, revenue, margins, ratios via EDGAR XBRL
 - [ ] `company_info` table — sector, industry, market cap
 - [ ] Automated daily refresh
@@ -524,18 +576,20 @@ for row in cur.fetchall():
 SEC_AI_AGENT/
 ├── agent/                    # Python virtual environment
 ├── data/
-│   ├── raw_html/             # Downloaded SEC HTML filings (local cache)
-│   └── md_files/             # Converted markdown files (38,136 files)
+│   ├── raw_html/             # HTML filings — 10-K/10-Q (local) + 8-K (download_8k.py output)
+│   └── md_files/             # Converted markdown files (38,136 files + 8-K additions)
 ├── notebooks/
-│   ├── downloader.ipynb      # SEC EDGAR → S3 downloader
+│   ├── downloader.ipynb      # SEC EDGAR → S3 (10-K + 10-Q)
 │   ├── convert_to_md.ipynb   # Original conversion notebook
 │   ├── create_table.ipynb    # Original schema notebook
 │   └── chunk.ipynb           # Original chunking notebook
-├── convert_to_md.py          # Production HTML → Markdown converter
-├── create_table.py           # PostgreSQL schema creation
-├── chunk.py                  # Parallel chunker + PostgreSQL inserter
-├── embed.py                  # GPU embedder + IVFFlat index builder
-# [planned] downloader.ipynb extended for 8-K filings
+├── convert_to_md.py          # HTML → Markdown (FORCE_RERUN flag)
+├── create_table.py           # filing_chunks PostgreSQL schema
+├── chunk.py                  # Parallel chunker (INCREMENTAL flag)
+├── embed.py                  # GPU embedder + IVFFlat index
+├── download_8k.py            # 8-K HTML downloader from S3 raw_8k/
+├── create_stock_table.py     # stock_prices PostgreSQL schema
+├── ingest_stocks.py          # Stock OHLCV ingestion from S3 stocks/
 ├── CODE_EXPLANATION.md       # Detailed per-script technical documentation
 └── README.md                 # This file
 ```

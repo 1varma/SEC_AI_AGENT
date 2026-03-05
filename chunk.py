@@ -21,6 +21,7 @@ OVERLAP_TOKENS = 200    # word overlap between consecutive chunks
 INSERT_BATCH   = 500    # rows per PostgreSQL INSERT batch
 CPU_WORKERS    = 24     # parallel processes for chunking
 FILE_BATCH     = 2000   # files per pool instance (keeps memory flat)
+INCREMENTAL    = False  # True = skip TRUNCATE, only insert new files (for 8-K top-ups)
 
 
 # ─── Parse metadata from filename ─────────────────────────────────────────────
@@ -143,18 +144,28 @@ def main():
     all_files = glob.glob(os.path.join(MD_FILES_PATH, "**", "*.md"), recursive=True)
     print(f"Found {len(all_files):,} files\n")
 
-    # ─── 2. Connect to DB and clear existing data ─────────────────────────────
+    # ─── 2. Connect to DB ─────────────────────────────────────────────────────
     print("Connecting to PostgreSQL...")
     conn = psycopg2.connect(**DB_CONFIG)
     cur  = conn.cursor()
-    cur.execute("TRUNCATE TABLE filing_chunks RESTART IDENTITY;")
-    conn.commit()
-    print("Table truncated.\n")
+
+    if INCREMENTAL:
+        # Fetch already-chunked source files so we skip them
+        cur.execute("SELECT DISTINCT source_file FROM filing_chunks;")
+        already_done = {row[0] for row in cur.fetchall()}
+        all_files = [f for f in all_files if os.path.basename(f) not in already_done]
+        print(f"Incremental mode: {len(all_files):,} new files to chunk "
+              f"({len(already_done):,} already in DB)\n")
+    else:
+        cur.execute("TRUNCATE TABLE filing_chunks RESTART IDENTITY;")
+        conn.commit()
+        print("Table truncated.\n")
 
     insert_sql = """
         INSERT INTO filing_chunks
             (ticker, filing_type, filing_date, section, chunk_index, chunk_text, source_file)
         VALUES %s
+        ON CONFLICT DO NOTHING
     """
 
     # ─── 3. Chunk + insert per file batch (memory stays flat) ─────────────────
