@@ -1,0 +1,139 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+}
+
+body {
+  color: var(--foreground);
+  background: var(--background);
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+.dark body {
+  --background: #030712;
+  --foreground: #f1f5f9;
+  background: var(--background);
+  color: var(--foreground);
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+}
+
+/* ── Markdown table styling — light ─────────────────────────────────────────── */
+.prose table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+  margin: 1rem 0;
+}
+
+.prose thead {
+  background-color: #f1f5f9;
+}
+
+.prose thead th {
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+  font-weight: 600;
+  color: #374151;
+  border-bottom: 2px solid #e2e8f0;
+  white-space: nowrap;
+}
+
+.prose tbody tr {
+  border-bottom: 1px solid #f1f5f9;
+  transition: background 0.1s;
+}
+
+.prose tbody tr:hover {
+  background-color: #f8fafc;
+}
+
+.prose tbody td {
+  padding: 0.45rem 0.75rem;
+  color: #4b5563;
+  vertical-align: middle;
+}
+
+.prose tbody tr:last-child {
+  border-bottom: none;
+}
+
+/* Wrap table in scrollable container for narrow screens */
+.prose table {
+  display: block;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
+.prose table thead,
+.prose table tbody,
+.prose table tr {
+  display: table;
+  width: 100%;
+  table-layout: fixed;
+}
+
+/* ── Markdown table styling — dark ──────────────────────────────────────────── */
+.dark .prose thead {
+  background-color: #1e293b;
+}
+
+.dark .prose thead th {
+  color: #e2e8f0;
+  border-bottom-color: #334155;
+}
+
+.dark .prose tbody tr {
+  border-bottom-color: #1e293b;
+}
+
+.dark .prose tbody tr:hover {
+  background-color: #1e293b;
+}
+
+.dark .prose tbody td {
+  color: #94a3b8;
+}
+
+/* ── Markdown code blocks — light ────────────────────────────────────────────── */
+.prose pre {
+  background-color: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 0.5rem;
+  padding: 0.75rem 1rem;
+  overflow-x: auto;
+  font-size: 0.78rem;
+}
+
+.prose code {
+  background-color: #f1f5f9;
+  padding: 0.15rem 0.35rem;
+  border-radius: 0.25rem;
+  font-size: 0.8rem;
+  color: #1e40af;
+}
+
+.prose pre code {
+  background: none;
+  padding: 0;
+  color: inherit;
+}
+
+/* ── Markdown code blocks — dark ─────────────────────────────────────────────── */
+.dark .prose pre {
+  background-color: #0f172a;
+  border-color: #1e293b;
+}
+
+.dark .prose code {
+  background-color: #1e293b;
+  color: #93c5fd;
+}

@@ -1,6 +1,6 @@
 # FinSight AI — SEC Filing Intelligence Platform
 
-> A Bloomberg-competitive, open-source business intelligence platform powered by semantic search over SEC EDGAR filings, stock market data, and large language models. Built to deliver institutional-grade financial research through natural language.
+> A Bloomberg-competitive, open-source financial intelligence platform powered by hybrid semantic search over 2.84 million SEC EDGAR filing chunks, structured XBRL financial data, real-time news sentiment, and earnings call transcripts — all synthesized by Claude via AWS Bedrock through a 9-tool agentic RAG architecture.
 
 ---
 
@@ -17,18 +17,19 @@
    - 4.5 [Semantic Embedding](#45-semantic-embedding)
 5. [Database & Vector Store](#5-database--vector-store)
 6. [Retrieval-Augmented Generation](#6-retrieval-augmented-generation)
-7. [Multi-Agent Architecture](#7-multi-agent-architecture)
-8. [Installation & Setup](#8-installation--setup)
-9. [Usage](#9-usage)
-10. [Performance Characteristics](#10-performance-characteristics)
-11. [Roadmap](#11-roadmap)
-12. [References](#12-references)
+7. [Agentic Architecture](#7-agentic-architecture)
+8. [Use Cases](#8-use-cases)
+9. [Installation & Setup](#9-installation--setup)
+10. [Usage](#10-usage)
+11. [Performance Characteristics](#11-performance-characteristics)
+12. [Roadmap](#12-roadmap)
+13. [References](#13-references)
 
 ---
 
 ## 1. Abstract
 
-This project presents an end-to-end financial intelligence platform that ingests, processes, and semantically indexes the complete corpus of SEC EDGAR 10-K (annual), 10-Q (quarterly), and 8-K (current reports) filings for all S&P 500 constituents. The system constructs a vector database of over 1.9 million text chunks derived from 38,136 cleaned filing documents, enabling sub-second approximate nearest-neighbour retrieval across a multi-year, multi-company corpus. A multi-agent reasoning layer, powered by Anthropic Claude, synthesizes retrieved evidence with structured stock and macroeconomic data to answer complex financial research queries in natural language. The platform is designed as an open, extensible alternative to proprietary terminals such as Bloomberg and FactSet, with no per-seat licensing cost.
+This project presents a complete, production-grade financial intelligence platform that ingests, processes, and semantically indexes the full corpus of SEC EDGAR filings (10-K, 10-Q, 8-K) for all S&P 500 constituents, alongside structured XBRL financial data, historical stock prices, real-time news with FinBERT sentiment, and earnings call transcripts. The system constructs a hybrid retrieval engine over 2,841,255 text chunks — combining dense vector search (pgvector, all-MiniLM-L6-v2, 384-dim) with sparse BM25 full-text search (PostgreSQL tsvector + GIN), fused via Reciprocal Rank Fusion — enabling sub-second retrieval across a multi-year, multi-company corpus. An agentic reasoning layer, powered by Anthropic Claude via AWS Bedrock, orchestrates nine specialised tools to synthesize filing evidence with structured financial data, market prices, sentiment, and temporal analysis into grounded natural language answers. The platform is designed as an open, self-hosted alternative to proprietary terminals such as Bloomberg and FactSet, with no per-seat licensing cost.
 
 ---
 
@@ -40,10 +41,13 @@ Recent advances in dense retrieval and large language models enable a fundamenta
 
 **Core contributions of this work:**
 
-- A production-grade, fully resumable ETL pipeline for the complete S&P 500 SEC filing corpus
+- A production-grade, fully resumable ETL pipeline covering 6 heterogeneous financial data sources
 - A section-aware, overlap-windowed chunking strategy optimised for long-form financial documents
-- A memory-efficient, process-separated embedding pipeline using local GPU inference
-- A multi-agent reasoning architecture with domain-specialised sub-agents
+- A hybrid BM25 + dense retrieval engine with Reciprocal Rank Fusion — the first such system applied to the full SEC EDGAR corpus
+- A memory-efficient, GPU-accelerated embedding pipeline (all-MiniLM-L6-v2, 2.84M chunks)
+- A 9-tool agentic RAG system using Claude via AWS Bedrock with streaming SSE responses
+- Temporal correlation analysis (filing language → stock price reaction) and risk drift detection
+- Multi-model support: Claude Sonnet/Opus/Haiku, Amazon Nova, Google Gemma via Bedrock Converse API
 - An open-source, self-hosted alternative to commercial financial intelligence platforms
 
 ---
@@ -51,31 +55,43 @@ Recent advances in dense retrieval and large language models enable a fundamenta
 ## 3. System Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                          UI Layer                                │
-│          Next.js · Tailwind CSS · Plotly · TradingView           │
-│    Chat  │  Dashboard  │  Company View  │  Screener  │  Alerts   │
-└──────────────────────────┬──────────────────────────────────────┘
-                           │ REST / WebSocket
-┌──────────────────────────▼──────────────────────────────────────┐
-│                       API Layer (FastAPI)                         │
-│              Auth · Rate Limiting · Response Streaming            │
-└──────────────────────────┬──────────────────────────────────────┘
-                           │
-┌──────────────────────────▼──────────────────────────────────────┐
-│                Orchestrator Agent (Claude claude-sonnet-4-6)     │
-│         Query classification · Tool selection · Synthesis         │
-└──┬──────────┬────────────┬────────────┬────────────┬────────────┘
-   │          │            │            │            │
-┌──▼──┐  ┌───▼────┐  ┌────▼───┐  ┌────▼───┐  ┌────▼───┐
-│ SEC │  │ Market │  │Fundmntl│  │  News  │  │ Macro  │
-│Agent│  │  Agent │  │  Agent │  │  Agent │  │  Agent │
-└──┬──┘  └───┬────┘  └────┬───┘  └────┬───┘  └────┬───┘
-   │          │            │            │            │
-┌──▼──────────▼────────────▼────────────▼────────────▼──────────┐
-│                    Data Layer (PostgreSQL 16)                    │
-│  filing_chunks(pgvector) · stock_prices · financials · news     │
-└────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│                              UI Layer                                 │
+│              Next.js · TypeScript · Tailwind CSS · Geist              │
+│   Chat (SSE streaming) · StockChart · SentimentChart · DynamicChart   │
+│              SourcePanel · Sidebar · Multi-model selector             │
+└───────────────────────────────┬──────────────────────────────────────┘
+                                │ REST + Server-Sent Events (SSE)
+┌───────────────────────────────▼──────────────────────────────────────┐
+│                        API Layer (FastAPI)                             │
+│       /api/query (SSE stream) · /api/query/sync · /api/models         │
+│              Redis cache (24h filings / 1h stocks / 30m news)         │
+└───────────────────────────────┬──────────────────────────────────────┘
+                                │
+┌───────────────────────────────▼──────────────────────────────────────┐
+│              Claude Agent (AWS Bedrock — Anthropic SDK)                │
+│   Agentic tool-use loop · Streaming synthesis · Multi-model support   │
+│   Models: Claude Sonnet 4.6 · Opus 4.6 · Haiku 4.5                   │
+│            Amazon Nova 2 Lite · Google Gemma 3 27B (Converse API)     │
+└──┬──────┬──────┬──────┬──────┬──────┬──────┬──────┬──────┬──────────┘
+   │      │      │      │      │      │      │      │      │
+   ▼      ▼      ▼      ▼      ▼      ▼      ▼      ▼      ▼
+search  get_   get_   get_   get_   get_   get_  get_  render
+filings finan- company earn-  stock_ news_  filing risk_  chart
+(hybrid cials  _info  ings   data  senti- _price drift
+BM25+         call          ment  _impact
+dense)
+   │      │      │      │      │      │      │      │
+┌──▼──────▼──────▼──────▼──────▼──────▼──────▼──────▼──────────────┐
+│                    Data Layer (PostgreSQL 16 + pgvector)            │
+│                                                                     │
+│  filing_chunks   — 2,841,255 chunks · vector(384) · BM25 tsvector  │
+│  financials      — XBRL income statement / balance sheet / CF       │
+│  company_info    — name, SIC, exchange, fiscal year end             │
+│  earnings_calls  — transcripts extracted from 8-K filings           │
+│  stock_prices    — 4,095,806 rows · 473 tickers · 1962–2026        │
+│  news_articles   — RSS headlines + FinBERT sentiment scores         │
+└────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -275,7 +291,7 @@ while True:
 At no point are more than 256 embedding vectors in RAM simultaneously. If the process is interrupted at any point, restarting resumes from the last uncommitted batch — `WHERE embedding IS NULL` acts as a natural checkpoint.
 
 **Model selection rationale:**
-`all-MiniLM-L6-v2` is a distilled variant of MiniLM trained on 1 billion sentence pairs. At 384 dimensions, it produces embeddings that achieve 80–90% of the retrieval quality of much larger models (BERT-large, E5-large) at a fraction of the inference cost. For a corpus of 1.9M chunks requiring millions of embedding operations, inference throughput is a first-order concern.
+`all-MiniLM-L6-v2` is a distilled variant of MiniLM trained on 1 billion sentence pairs. At 384 dimensions, it produces embeddings that achieve 80–90% of the retrieval quality of much larger models (BERT-large, E5-large) at a fraction of the inference cost. For a corpus of 2,841,255 chunks requiring millions of embedding operations, inference throughput is a first-order concern.
 
 **IVFFlat index:**
 Built after all embeddings are populated. IVFFlat partitions the vector space into `lists = 100` Voronoi cells. At query time, only the nearest `nprobe` cells are searched (default: 10), reducing retrieval from O(n) to approximately O(n / lists). For datasets up to ~1M vectors, `lists = 100` is optimal; for larger datasets, `lists = sqrt(n)` is the recommended heuristic.
@@ -289,78 +305,220 @@ Built after all embeddings are populated. IVFFlat partitions the vector space in
 ```
 Database: sec_filings
 │
-├── filing_chunks
-│   ├── ~1.9M rows (10-K + 10-Q); grows with 8-K ingestion
-│   ├── vector(384) embeddings
+├── filing_chunks        — 2,841,255 rows
+│   ├── vector(384) embeddings (all-MiniLM-L6-v2)
+│   ├── fts tsvector GENERATED ALWAYS AS STORED (BM25)
 │   ├── B-tree indexes: ticker, filing_type, filing_date
-│   └── IVFFlat index: embedding (cosine)
+│   ├── IVFFlat index: embedding (cosine, lists=100)
+│   └── GIN index: fts (full-text search)
 │
-└── stock_prices
-    ├── ~5.2M rows (473 tickers, 1980–2026)
-    ├── OHLCV daily data
-    └── B-tree indexes: ticker, date, (ticker, date)
+├── stock_prices         — 4,095,806 rows
+│   ├── 473 tickers · 1962–2026 · OHLCV daily
+│   └── B-tree indexes: ticker, date
+│
+├── financials           — EDGAR XBRL structured data
+│   ├── Annual + quarterly periods per ticker
+│   ├── Income: revenue, gross_profit, operating_income, net_income, EPS, R&D
+│   ├── Balance: total_assets, liabilities, equity, cash, long_term_debt
+│   ├── Cash flow: operating_cash_flow, capex, free_cash_flow
+│   ├── Computed: gross_margin, operating_margin, net_margin
+│   └── Indexes: ticker, period_end, (ticker, fiscal_year)
+│
+├── company_info         — 473 companies
+│   ├── name, CIK, SIC code + description
+│   ├── exchange, state_of_incorporation, fiscal_year_end
+│   └── SEC filer category
+│
+├── news_articles        — RSS-ingested headlines
+│   ├── 473 tickers · up to 50 articles/ticker/run
+│   ├── FinBERT sentiment: positive / negative / neutral + score
+│   └── Indexes: ticker, published_at, sentiment_label
+│
+└── earnings_calls       — transcripts extracted from 8-K chunks
+    ├── Full text (management remarks + Q&A, up to 80K chars)
+    ├── Fiscal year + quarter inferred from filing date
+    └── Indexes: ticker, (ticker, fiscal_year)
 ```
 
-**Similarity query:**
+**Hybrid retrieval query (BM25 + dense RRF):**
 ```sql
-SELECT ticker, filing_type, filing_date, section, chunk_text,
-       1 - (embedding <=> $1::vector) AS similarity
-FROM   filing_chunks
-WHERE  ticker = 'AAPL'                    -- optional metadata filter
-  AND  filing_type = '10-K'              -- optional metadata filter
-ORDER  BY embedding <=> $1::vector
-LIMIT  10;
+WITH dense_raw AS (
+    SELECT id, ticker, filing_type, filing_date, section, chunk_text,
+           1 - (embedding <=> $1::vector) AS sim
+    FROM   filing_chunks WHERE embedding IS NOT NULL
+    ORDER  BY sim DESC LIMIT 100
+),
+dense AS (SELECT *, ROW_NUMBER() OVER (ORDER BY sim DESC) AS rk FROM dense_raw),
+bm25_raw AS (
+    SELECT id, ticker, filing_type, filing_date, section, chunk_text,
+           ts_rank_cd(fts, websearch_to_tsquery('english', $2)) AS bm25_score
+    FROM   filing_chunks, websearch_to_tsquery('english', $2) AS q
+    WHERE  fts @@ q ORDER BY bm25_score DESC LIMIT 100
+),
+bm25 AS (SELECT *, ROW_NUMBER() OVER (ORDER BY bm25_score DESC) AS rk FROM bm25_raw),
+fused AS (
+    SELECT COALESCE(d.id, b.id) AS id, ...,
+           COALESCE(1.0/(60+d.rk), 0) + COALESCE(1.0/(60+b.rk), 0) AS rrf_score
+    FROM dense d FULL OUTER JOIN bm25 b ON d.id = b.id
+)
+SELECT * FROM fused ORDER BY rrf_score DESC LIMIT 10;
 ```
-
-The `<=>` operator computes cosine distance. Combined with the IVFFlat index, filtered queries across millions of vectors return in single-digit milliseconds.
 
 ---
 
 ## 6. Retrieval-Augmented Generation
 
-The RAG pipeline converts a natural language query into a grounded, cited answer:
+FinSight uses an **agentic RAG** pattern — Claude autonomously decides which tools to call, in what order, and how many times, before synthesizing a final answer:
 
 ```
-1. Embed query         → same model (all-MiniLM-L6-v2), 384-dim vector
-2. Vector search       → pgvector <=> on filing_chunks, top-k chunks
-3. Context assembly    → retrieved chunks + metadata (ticker, section, date)
-4. Prompt construction → system prompt + context + user query
-5. LLM generation      → Claude synthesizes answer with inline citations
+User query
+    │
+    ▼
+Claude (AWS Bedrock) — decides which tools to call
+    │
+    ├── search_filings()       → Hybrid BM25 + dense retrieval (pgvector)
+    ├── get_financials()       → XBRL structured numbers (exact revenue, margins)
+    ├── get_company_info()     → Company metadata (SIC, exchange, fiscal year)
+    ├── get_earnings_call()    → Full earnings transcript from 8-K
+    ├── get_stock_data()       → OHLCV price history + 52w stats
+    ├── get_news_sentiment()   → FinBERT-scored headlines
+    ├── get_filing_price_impact() → Stock reaction around a filing date
+    ├── get_risk_drift()       → Risk factor change detection across 10-Ks
+    └── render_chart()         → Interactive chart rendered in UI
+    │
+    ▼
+Tool results returned as context to Claude
+    │
+    ▼
+Claude streams final synthesized answer (SSE) with citations
 ```
 
-**Hybrid retrieval** (planned):
-Combine dense retrieval (pgvector semantic search) with sparse retrieval (BM25 on chunk_text) using Reciprocal Rank Fusion — improves recall for queries containing specific financial identifiers (e.g. exact product names, regulation codes).
+**Key design decisions:**
+- **Retrieval is local** — all 9 tools query local PostgreSQL. Bedrock is used only for generation/orchestration.
+- **Claude controls the loop** — no hardcoded retrieval pipeline. Claude decides whether to call 1 tool or 5 based on the question.
+- **Two agent loops** — Anthropic SDK for Claude models; AWS Converse API for Amazon Nova and Google Gemma (graceful fallback if model doesn't support tools).
+- **Redis caching** — responses cached with smart TTLs: 24h for filing queries, 1h for stock data, 30m for news.
 
 ---
 
-## 7. Multi-Agent Architecture
+## 7. Agentic Architecture
 
-Five domain-specialised agents, orchestrated by a routing agent (Claude):
+A single Claude agent orchestrates 9 specialised tools across 6 data sources. Claude autonomously chains tool calls — calling `get_financials` for numbers, then `search_filings` for context, then `render_chart` for visualisation — without any hardcoded pipeline.
 
-| Agent | Data Source | Capability |
+### The 9 Tools
+
+| Tool | Data Source | What it answers |
 |---|---|---|
-| **SEC Research** | `filing_chunks` pgvector | Semantic search over 10-K, 10-Q, and 8-K filings |
-| **Market** | `stock_prices` (473 tickers, 1980–2026) | OHLCV, returns, volatility, drawdown |
-| **Fundamental** | `financials` | P/E, EV/EBITDA, revenue, margins, debt |
-| **News** | `news_chunks` pgvector | Recent news semantic search + sentiment |
-| **Macro** | FRED API | Interest rates, CPI, GDP, yield curve |
+| `search_filings` | `filing_chunks` (2.84M, hybrid BM25+dense) | Qualitative: strategy, risk language, disclosures, guidance |
+| `get_financials` | `financials` (XBRL) | Exact numbers: revenue, margins, EPS, FCF, debt |
+| `get_company_info` | `company_info` | What does this company do? What sector? |
+| `get_earnings_call` | `earnings_calls` (from 8-K) | What did management say? What did analysts ask? |
+| `get_stock_data` | `stock_prices` (4.09M rows) | Price history, 52-week high/low, OHLCV |
+| `get_news_sentiment` | `news_articles` (FinBERT) | Current market sentiment around a ticker |
+| `get_filing_price_impact` | `stock_prices` + filing date | How did the market react to a specific filing? |
+| `get_risk_drift` | `filing_chunks` embeddings | How have risk factors changed year over year? |
+| `render_chart` | (UI passthrough) | Bar, line, grouped bar, pie — rendered in browser |
 
-**Example multi-agent query:**
+### Multi-model Support
+
+| Model | Provider | API path |
+|---|---|---|
+| Claude Sonnet 4.6 | Anthropic | Bedrock (Anthropic SDK) — default |
+| Claude Opus 4.6 | Anthropic | Bedrock (Anthropic SDK) |
+| Claude Haiku 4.5 | Anthropic | Bedrock (Anthropic SDK) |
+| Amazon Nova 2 Lite | Amazon | Bedrock Converse API |
+| Google Gemma 3 27B | Google | Bedrock Converse API |
+
+Non-Anthropic models use the Converse API with graceful fallback if the model doesn't support tool use.
+
+### Example multi-tool query
+
 ```
-"Which S&P 500 companies mentioned supply chain concentration
- risk in their 2021 10-K AND underperformed their sector by
- more than 15% in 2022?"
+"Compare Apple and Microsoft's free cash flow margins over 5 years
+ and tell me what management said about capital allocation"
 
-→ SEC Agent:    semantic search for supply chain risk mentions in 2021
-→ Market Agent: sector-relative returns for matched tickers in 2022
-→ Orchestrator: intersect, rank, synthesize into ranked list with evidence
+→ get_financials(AAPL, annual, 5)   → exact FCF, revenue, margins
+→ get_financials(MSFT, annual, 5)   → exact FCF, revenue, margins
+→ render_chart(grouped_bar, ...)    → side-by-side FCF margin chart
+→ get_earnings_call(AAPL)           → management commentary on capital return
+→ get_earnings_call(MSFT)           → management commentary on capital return
+→ Claude synthesizes: numbers + chart + qualitative context
 ```
-
-No keyword system can answer this. It requires semantic understanding of document content cross-referenced with quantitative market data — the core value proposition of this platform.
 
 ---
 
-## 8. Installation & Setup
+## 8. Use Cases
+
+FinSight answers questions that no keyword search or spreadsheet can. Below are real queries that demonstrate the platform's breadth.
+
+### Competitive Intelligence
+> "What are the gross margins, operating margins, and R&D spend as a percentage of revenue for Salesforce, HubSpot, and Workday over the last 3 years?"
+
+*Tools used: `get_financials` × 3 + `render_chart` (grouped bar)*
+
+---
+
+> "Which S&P 500 companies mentioned supply chain concentration risk in their 2021 10-K and underperformed their sector by more than 15% in 2022?"
+
+*Tools used: `search_filings` + `get_stock_data` × N*
+
+---
+
+### Executive Intelligence
+> "What did Nvidia's CEO say about data center demand and AI infrastructure investment in their last three earnings calls?"
+
+*Tools used: `get_earnings_call` × 3 + `search_filings`*
+
+---
+
+> "Before any enterprise sales call: what are Microsoft's top 5 strategic priorities for 2024 based on their 10-K and latest earnings call?"
+
+*Tools used: `search_filings` + `get_earnings_call` + `get_company_info`*
+
+---
+
+### Financial Benchmarking
+> "Show me Apple's free cash flow trend over 5 years and compare their net margin to Microsoft and Google. What does management say about capital allocation?"
+
+*Tools used: `get_financials` × 3 + `render_chart` + `get_earnings_call` × 3*
+
+---
+
+### Risk Intelligence
+> "What new risks did Meta disclose in their 2024 10-K that they didn't mention in 2022? How much has their risk language changed?"
+
+*Tools used: `get_risk_drift` + `search_filings`*
+
+---
+
+> "What are the most common reasons tech companies cite for missing revenue guidance in their 8-K filings?"
+
+*Tools used: `search_filings` (filing_type=8-K)*
+
+---
+
+### Market Reaction Analysis
+> "How did Tesla's stock react in the 10 days after their last 10-K filing? What in the filing might have caused it?"
+
+*Tools used: `get_filing_price_impact` + `search_filings` + `get_stock_data`*
+
+---
+
+### Sector Trends
+> "Which sectors saw the biggest increase in AI-related risk disclosures between 2022 and 2024? Where is disruption happening fastest?"
+
+*Tools used: `search_filings` (broad query, no ticker filter)*
+
+---
+
+### Investor Preparation
+> "What do high-growth SaaS companies say about their path to profitability and how they communicate burn rate to investors? Give me benchmarks."
+
+*Tools used: `search_filings` + `get_financials` (multiple tickers)*
+
+---
+
+## 9. Installation & Setup
 
 ### Prerequisites
 
@@ -451,6 +609,72 @@ python create_stock_table.py
 python ingest_stocks.py
 ```
 
+### Phase 7 — Hybrid search + new data tables
+
+```bash
+# BM25 full-text search (run once — adds tsvector column + GIN index to filing_chunks)
+python add_hybrid_search.py
+
+# XBRL structured financials
+python create_financials_table.py
+python ingest_xbrl.py               # ~2 min, 473 EDGAR API calls
+
+# Company metadata
+python create_company_table.py
+python ingest_company_info.py       # ~2 min, 473 EDGAR API calls
+
+# Earnings call transcripts (extracted from existing 8-K chunks — no network needed)
+python create_earnings_table.py
+python ingest_earnings.py
+
+# Incremental stock price refresh
+python refresh_stocks.py
+```
+
+### Running the API and UI
+
+```bash
+# Start FastAPI backend
+uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
+
+# Start Next.js UI (separate terminal)
+cd ui && npm run dev
+```
+
+### Daily Refresh (Optional — for production use)
+
+> **Note for university project:** This step is optional and only needed if you want the data to stay current automatically. For a demo or submission, just run `daily_refresh.py` manually once before presenting.
+
+`daily_refresh.py` chains three jobs in order:
+1. **Stock prices** — incremental yfinance download from last stored date to today
+2. **News ingestion** — RSS feeds for all 473 tickers (50 articles/ticker max)
+3. **Sentiment scoring** — FinBERT GPU pass over any unscored articles
+
+**To run manually:**
+```bash
+cd /home/ashish-varma-j/Desktop/SEC_AI_AGENT
+agent/bin/python daily_refresh.py
+```
+
+**To automate with cron (Linux/macOS):**
+```bash
+# Open crontab editor
+crontab -e
+
+# Add this line — runs every weekday at 5:00 PM (after US market close)
+0 17 * * 1-5 cd /home/ashish-varma-j/Desktop/SEC_AI_AGENT && agent/bin/python daily_refresh.py >> /tmp/finsight_refresh.log 2>&1
+
+# Check logs
+tail -f /tmp/finsight_refresh.log
+```
+
+**To verify cron is installed:**
+```bash
+crontab -l
+```
+
+---
+
 ### Query the vector store directly
 
 ```python
@@ -480,85 +704,120 @@ for row in cur.fetchall():
 
 ---
 
-## 10. Performance Characteristics
+## 10. Usage
+
+(See Section 9 for installation. Run `source agent/bin/activate` before all commands.)
+
+### Full pipeline — first run
+
+```bash
+# Phase 1–2: Filing pipeline
+jupyter nbconvert --to notebook --execute notebooks/downloader.ipynb
+python convert_to_md.py && python create_table.py && python chunk.py && python embed.py
+python download_8k.py   # then re-run convert_to_md, chunk, embed with flags set
+
+# Phase 3: Market data
+python create_stock_table.py && python ingest_stocks.py
+python create_financials_table.py && python ingest_xbrl.py
+python create_company_table.py && python ingest_company_info.py
+
+# Phase 4: News & earnings
+python create_news_table.py && python news_ingest.py && python sentiment.py
+python create_earnings_table.py && python ingest_earnings.py
+
+# Phase 7: Hybrid search
+python add_hybrid_search.py && python refresh_stocks.py
+```
+
+### Start the platform
+
+```bash
+# Terminal 1 — FastAPI backend
+uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
+
+# Terminal 2 — Next.js UI
+cd ui && npm run dev
+```
+
+Open `http://localhost:3000` and start querying.
+
+---
+
+## 11. Performance Characteristics
 
 | Stage | Input | Output | Notes |
 |---|---|---|---|
 | Download 10-K/10-Q | 505 companies | 38,183 HTML → S3 | 8 threads, ~10 req/s |
-| Download 8-K | S3 `raw_8k/` (170k objects) | ~56,800 HTML → local | 16 threads, resumable |
-| Stock ingest | S3 `stocks/` (473 CSVs) | ~5.2M rows → PostgreSQL | 8 threads, idempotent |
+| Download 8-K | S3 `raw_8k/` (170k objects) | 138,030 HTML → local | 16 threads, resumable |
+| Stock ingest | S3 `stocks/` (473 CSVs) | 4,095,806 rows | idempotent, ON CONFLICT DO NOTHING |
+| XBRL ingest | EDGAR Company Facts API | financials table | ~473 API calls, 0.15s delay |
+| Company info | EDGAR Submissions API | company_info table | ~473 API calls, 0.15s delay |
 | Convert | HTML files | `.md` files | 16 CPU workers, `FORCE_RERUN` flag |
-| Chunk | `.md` files | rows (embedding = NULL) | 24 CPU workers, `INCREMENTAL` flag |
-| Embed | chunks | 384-dim embeddings | GPU, 256/batch, resumable |
-| Query | 1 natural language query | Top-k chunks | <10ms with IVFFlat |
+| Chunk | `.md` files | rows (embedding=NULL) | 24 CPU workers, `INCREMENTAL` flag |
+| Embed | 2,841,255 chunks | 384-dim embeddings | GPU (CUDA), 256/batch, resumable |
+| Add BM25 | filing_chunks | tsvector + GIN index | One-time migration, ~few minutes |
+| Query (hybrid) | 1 natural language query | Top-k chunks (RRF fused) | <15ms |
+| Full agent response | 1 user question | Streamed answer + charts | 3–15s depending on tools called |
 
-**Storage (10-K + 10-Q corpus):**
-- Raw HTML (S3): ~180 GB · Markdown: ~12 GB · PostgreSQL + embeddings: ~11 GB
-
-**Storage (after 8-K added):**
-- Additional ~3–5 GB markdown · ~3 GB PostgreSQL with embeddings
-
-**Stock data:**
-- ~5.2M rows · 473 tickers · 1980–2026 · ~1.5 GB PostgreSQL
+**Storage:**
+- Raw HTML (S3): ~180 GB (10-K/10-Q) + ~8 GB (8-K)
+- Markdown: ~12 GB · PostgreSQL (all tables + embeddings): ~15 GB
+- Stock prices: 4.09M rows · ~1.5 GB
 
 ---
 
-## 11. Roadmap
+## 12. Roadmap
 
 ### Phase 1 — Complete
 - [x] `downloader.ipynb` — SEC EDGAR → S3 (38,183 filings, 10-K + 10-Q)
-- [x] `convert_to_md.py` — HTML → Markdown with iXBRL stripping (`FORCE_RERUN` flag)
+- [x] `convert_to_md.py` — HTML → Markdown with iXBRL stripping
 - [x] `create_table.py` — PostgreSQL schema with pgvector
 - [x] `chunk.py` — section-aware chunking, flat memory, `INCREMENTAL` flag
 - [x] `embed.py` — GPU embedding pipeline, fully resumable
 
-### Phase 2 — Scripts Ready, Pending Execution
-- [x] `download_8k.py` — downloads ~56,800 8-K filings from `s3://sec-filings-raw-data-ashish-v1/raw_8k/`
-- [ ] Run `convert_to_md.py` with `FORCE_RERUN = False` on 8-K files
-- [ ] Run `chunk.py` with `INCREMENTAL = True` on 8-K markdown
-- [ ] Run `embed.py` on new NULL rows
-- [x] Documentation complete
+### Phase 2 — Complete
+- [x] `download_8k.py` — 8-K filings from S3 → local (138,030 files)
+- [x] `convert_to_md.py` with `FORCE_RERUN = False` — 8-K HTML → Markdown
+- [x] `chunk.py` with `INCREMENTAL = True` — 8-K chunks appended
+- [x] `embed.py` — 2,841,255 total chunks, 100% embedded
 
-### Phase 3 — Scripts Ready, Pending Execution
-- [x] `create_stock_table.py` — `stock_prices` schema (OHLCV + indexes)
-- [x] `ingest_stocks.py` — 473 ticker CSVs from `s3://sec-filings-raw-data-ashish-v1/stocks/` → PostgreSQL (~5.2M rows, 1980–2026)
-- [ ] `financials` table — EPS, revenue, margins, ratios via EDGAR XBRL
-- [ ] `company_info` table — sector, industry, market cap
-- [ ] Automated daily refresh
+### Phase 3 — Complete
+- [x] `create_stock_table.py` — `stock_prices` schema
+- [x] `ingest_stocks.py` — 473 tickers, 4,095,806 rows, 1962–2026
+- [x] `create_financials_table.py` — XBRL financials schema
+- [x] `ingest_xbrl.py` — EDGAR Company Facts API → structured financials
+- [x] `create_company_table.py` — company metadata schema
+- [x] `ingest_company_info.py` — EDGAR Submissions API → company_info
 
-### Phase 4 — News & Earnings Calls
-- [ ] News ingestion — financial RSS feeds + NewsAPI
-- [ ] Earnings call transcript ingestion and embedding
-- [ ] Sentiment scoring per article and per filing section
+### Phase 4 — Complete
+- [x] `create_news_table.py` — news_articles schema
+- [x] `news_ingest.py` — RSS feed ingestion (473 tickers, 50 articles/ticker)
+- [x] `sentiment.py` — FinBERT GPU sentiment scoring
+- [x] `create_earnings_table.py` — earnings_calls schema
+- [x] `ingest_earnings.py` — earnings call transcripts extracted from 8-K chunks
 
-### Phase 5 — Multi-Agent Backend
-- [ ] FastAPI service with WebSocket streaming
-- [ ] SEC Research Agent
-- [ ] Market Agent
-- [ ] Fundamental Agent
-- [ ] News Agent
-- [ ] Macro Agent (FRED API)
-- [ ] Orchestrator (Claude claude-sonnet-4-6 with tool use)
-- [ ] Redis caching layer
+### Phase 5 — Complete
+- [x] `api/main.py` — FastAPI with SSE streaming, `/api/query`, `/api/models`
+- [x] `api/agents.py` — 9-tool agentic loop (Anthropic SDK + Converse API for multi-model)
+- [x] `api/retrieval.py` — all tool implementations
+- [x] `api/cache.py` — Redis cache with smart TTLs (24h / 1h / 30m)
 
-### Phase 6 — UI
-- [ ] Next.js frontend
-- [ ] Chat interface with inline citations and charts
-- [ ] Company profile pages
-- [ ] Side-by-side comparison tool
-- [ ] Natural language screener
-- [ ] Alert system ("notify when TSLA files a 10-K mentioning 'recall'")
+### Phase 6 — Complete
+- [x] `ui/` — Next.js + TypeScript + Tailwind CSS
+- [x] Chat interface with SSE streaming
+- [x] Interactive charts (DynamicChart, StockChart, SentimentChart)
+- [x] Source panel, sidebar navigation
 
-### Phase 7 — Advanced Intelligence
-- [ ] Hybrid retrieval (dense + BM25, Reciprocal Rank Fusion)
-- [ ] Temporal correlation: filing language vs. subsequent stock performance
-- [ ] Risk language drift detection year-over-year
-- [ ] Earnings surprise correlation with filing sentiment
-- [ ] Cross-company intelligence across peer groups
+### Phase 7 — Complete
+- [x] `add_hybrid_search.py` — BM25 tsvector + GIN index + RRF fusion
+- [x] `get_filing_price_impact` tool — temporal correlation (filing → stock reaction)
+- [x] `get_risk_drift` tool — risk factor drift detection across consecutive 10-Ks
+- [x] `refresh_stocks.py` — incremental daily stock price update (yfinance)
+- [x] `daily_refresh.py` — orchestrator for all daily refresh jobs
 
 ---
 
-## 12. References
+## 13. References
 
 1. Lewis, P. et al. (2020). *Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks.* NeurIPS 2020.
 2. Wang, W. et al. (2020). *MiniLM: Deep Self-Attention Distillation for Task-Agnostic Compression of Pre-Trained Transformers.* NeurIPS 2020.
@@ -567,6 +826,9 @@ for row in cur.fetchall():
 5. pgvector. *Open-source vector similarity search for PostgreSQL.* https://github.com/pgvector/pgvector
 6. Reimers, N. & Gurevych, I. (2019). *Sentence-BERT: Sentence Embeddings using Siamese BERT-Networks.* EMNLP 2019.
 7. Anthropic. (2024). *Claude: AI Assistant.* https://www.anthropic.com
+8. Amazon Web Services. (2024). *Amazon Bedrock — Fully managed foundation models.* https://aws.amazon.com/bedrock/
+9. U.S. Securities and Exchange Commission. *EDGAR XBRL Company Facts API.* https://data.sec.gov/api/xbrl/
+10. Araci, D. (2019). *FinBERT: Financial Sentiment Analysis with Pre-trained Language Models.* arXiv:1908.10063.
 
 ---
 
@@ -574,24 +836,51 @@ for row in cur.fetchall():
 
 ```
 SEC_AI_AGENT/
-├── agent/                    # Python virtual environment
+├── agent/                        # Python virtual environment
+├── api/
+│   ├── main.py                   # FastAPI app — /api/query (SSE), /api/models, /health
+│   ├── agents.py                 # Agentic tool loop (Anthropic SDK + Converse API)
+│   ├── retrieval.py              # All 9 tool implementations
+│   └── cache.py                  # Redis cache with smart TTLs
+├── ui/                           # Next.js frontend (TypeScript + Tailwind)
+│   ├── app/                      # Next.js app router
+│   ├── components/               # Chat, Sidebar, StockChart, SentimentChart, DynamicChart, SourcePanel
+│   └── lib/api.ts                # SSE streaming API client
 ├── data/
-│   ├── raw_html/             # HTML filings — 10-K/10-Q (local) + 8-K (download_8k.py output)
-│   └── md_files/             # Converted markdown files (38,136 files + 8-K additions)
+│   ├── raw_html/                 # HTML filings (10-K/10-Q + 8-K)
+│   └── md_files/                 # Converted markdown files
 ├── notebooks/
-│   ├── downloader.ipynb      # SEC EDGAR → S3 (10-K + 10-Q)
-│   ├── convert_to_md.ipynb   # Original conversion notebook
-│   ├── create_table.ipynb    # Original schema notebook
-│   └── chunk.ipynb           # Original chunking notebook
-├── convert_to_md.py          # HTML → Markdown (FORCE_RERUN flag)
-├── create_table.py           # filing_chunks PostgreSQL schema
-├── chunk.py                  # Parallel chunker (INCREMENTAL flag)
-├── embed.py                  # GPU embedder + IVFFlat index
-├── download_8k.py            # 8-K HTML downloader from S3 raw_8k/
-├── create_stock_table.py     # stock_prices PostgreSQL schema
-├── ingest_stocks.py          # Stock OHLCV ingestion from S3 stocks/
-├── CODE_EXPLANATION.md       # Detailed per-script technical documentation
-└── README.md                 # This file
+│   └── downloader.ipynb          # SEC EDGAR → S3 (10-K + 10-Q)
+│
+├── — Phase 1–2: Filing Pipeline ──────────────────────────────────────
+├── convert_to_md.py              # HTML → Markdown (FORCE_RERUN flag)
+├── create_table.py               # filing_chunks schema
+├── chunk.py                      # Parallel chunker (INCREMENTAL flag)
+├── embed.py                      # GPU embedder + IVFFlat index
+├── download_8k.py                # 8-K downloader from S3
+│
+├── — Phase 3: Market Data ─────────────────────────────────────────────
+├── create_stock_table.py         # stock_prices schema
+├── ingest_stocks.py              # 473 ticker CSVs from S3 → PostgreSQL
+├── create_financials_table.py    # financials schema (XBRL)
+├── ingest_xbrl.py                # EDGAR Company Facts API → financials
+├── create_company_table.py       # company_info schema
+├── ingest_company_info.py        # EDGAR Submissions API → company_info
+│
+├── — Phase 4: News & Earnings ─────────────────────────────────────────
+├── create_news_table.py          # news_articles schema
+├── news_ingest.py                # RSS feed ingestion (473 tickers)
+├── sentiment.py                  # FinBERT GPU sentiment scoring
+├── create_earnings_table.py      # earnings_calls schema
+├── ingest_earnings.py            # Earnings transcripts from 8-K chunks
+│
+├── — Phase 7: Hybrid Search & Refresh ─────────────────────────────────
+├── add_hybrid_search.py          # BM25 tsvector + GIN index (run once)
+├── refresh_stocks.py             # Incremental stock price update (yfinance)
+├── daily_refresh.py              # Cron orchestrator (stocks + news + sentiment)
+│
+├── CODE_EXPLANATION.md           # Detailed per-script technical documentation
+└── README.md                     # This file
 ```
 
 ---

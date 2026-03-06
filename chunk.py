@@ -21,7 +21,7 @@ OVERLAP_TOKENS = 200    # word overlap between consecutive chunks
 INSERT_BATCH   = 500    # rows per PostgreSQL INSERT batch
 CPU_WORKERS    = 24     # parallel processes for chunking
 FILE_BATCH     = 2000   # files per pool instance (keeps memory flat)
-INCREMENTAL    = False  # True = skip TRUNCATE, only insert new files (for 8-K top-ups)
+INCREMENTAL    = True   # True = skip TRUNCATE, only insert new files (for 8-K top-ups)
 
 
 # ─── Parse metadata from filename ─────────────────────────────────────────────

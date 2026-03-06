@@ -12,7 +12,7 @@ MD_OUTPUT_PATH = os.path.expanduser("~/Desktop/SEC_AI_AGENT/data/md_files")
 CPU_WORKERS    = 16      # leave some cores free
 MIN_OUTPUT_CHARS = 200
 MAX_FILE_SIZE_MB = 20    # skip files larger than this (likely malformed)
-FORCE_RERUN    = True    # set True to re-convert already-converted files
+FORCE_RERUN    = False   # False = skip already-converted files (safe for 8-K top-up)
 
 
 def strip_ixbrl_header(html: str) -> str:
